@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Kardal Payment Integration Guide</title>
+<style>
+  @page { size: A4; margin: 16mm 15mm; }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; color: #1a1a1a; font-size: 10.5px; line-height: 1.5; }
+  h1 { font-size: 25px; margin: 0 0 2px; color: #111; }
+  h2 { font-size: 15px; margin: 20px 0 7px; padding-bottom: 4px; border-bottom: 2px solid #ea580c; color: #111; }
+  h3 { font-size: 12.5px; margin: 14px 0 5px; color: #ea580c; }
+  h4 { font-size: 11px; margin: 10px 0 4px; color:#333; }
+  .sub { color: #555; font-size: 12px; margin-bottom: 2px; }
+  .meta { color: #888; font-size: 9.5px; margin-bottom: 12px; }
+  table { width: 100%; border-collapse: collapse; margin: 7px 0 12px; font-size: 9.5px; }
+  th, td { border: 1px solid #ddd; padding: 5px 7px; text-align: left; vertical-align: top; }
+  th { background: #f5f5f5; font-weight: 600; }
+  code { font-family: "SF Mono", Menlo, Consolas, monospace; background: #f3f4f6; padding: 1px 4px; border-radius: 3px; font-size: 9px; }
+  pre { background: #1e1e2e; color: #e4e4e7; padding: 9px 11px; border-radius: 6px; font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 8.6px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; }
+  pre .k { color: #f9a8d4; } pre .s { color: #86efac; } pre .c { color: #71717a; } pre .y { color:#fde68a; }
+  .callout { border-left: 4px solid #ea580c; background: #fff7ed; padding: 7px 11px; margin: 9px 0; border-radius: 0 4px 4px 0; }
+  .ok { border-left-color: #16a34a; background: #f0fdf4; }
+  .warn { border-left-color: #dc2626; background: #fef2f2; }
+  ul, ol { margin: 5px 0 11px 18px; padding: 0; }
+  li { margin: 2px 0; }
+  .tag { display:inline-block; background:#ea580c; color:#fff; font-size:8px; padding:1px 6px; border-radius:8px; vertical-align:middle; }
+  .tag.g { background:#16a34a; } .tag.b { background:#2563eb; }
+  .small { font-size: 9px; color:#777; }
+  .footer { margin-top: 18px; padding-top: 8px; border-top: 1px solid #eee; color:#999; font-size:9px; }
+  .seq { font-size: 8.6px; }
+</style>
+</head>
+<body>
+
+<h1>Kardal Payment Integration Guide</h1>
+<div class="sub">What a merchant must build to accept <b>KHQR</b> and <b>Card</b> payments via the Kardal gateway</div>
+<div class="meta">Reference app: <code>kardal-merchant-demo</code> (Laravel + React) &middot; Gateway: <code>{base}/api/mch/v2/gateway</code> &middot; Environment: Kardal DEV</div>
+
+<div class="callout">
+<b>Scope.</b> Integration only. Assumes the merchant is already onboarded &amp; <b>activated</b>, and holds its credential package (<code>credential.txt</code> + <code>*-public.key</code>). This guide covers what <i>you</i>, the integrating merchant, build: auth, signing, checkout (KHQR + Card), status polling, and the notify webhook.
+</div>
+
+<h2>1. What the merchant must do &mdash; checklist</h2>
+<table>
+<tr><th>#</th><th>Responsibility</th><th>Where</th></tr>
+<tr><td>1</td><td>Store credentials server-side (never in browser): <code>client_id/secret</code>, <code>username/password</code>, <code>seller_code</code>, <code>api_key</code>, RSA public key</td><td>Backend config / secrets</td></tr>
+<tr><td>2</td><td>Get + cache an OAuth access token; attach <code>Bearer</code> to every gateway call</td><td>Backend</td></tr>
+<tr><td>3</td><td>Build + attach the request <code>sign</code> (MD5 / HMAC-SHA256) to every gateway request</td><td>Backend</td></tr>
+<tr><td>4</td><td>Create the order: KHQR (<code>nativePay</code>) or Card (<code>directPay</code>) with a unique <code>out_trade_no</code></td><td>Backend</td></tr>
+<tr><td>5</td><td>Render the result to the buyer: KHQR image, or the 3DS <code>html_confirm_payment</code> for cards</td><td>Frontend</td></tr>
+<tr><td>6</td><td>Expose a public <code>notify_url</code> webhook; <b>verify its sign</b>; mark the order paid</td><td>Backend</td></tr>
+<tr><td>7</td><td>Reconcile via <code>queryOrder</code> (poll / fallback) &mdash; never trust the browser for final state</td><td>Backend</td></tr>
+<tr><td>8</td><td>Be idempotent: dedupe by <code>out_trade_no</code>; return HTTP 200 to the webhook</td><td>Backend</td></tr>
+</table>
+<div class="callout warn"><b>Golden rule.</b> The buyer&rsquo;s browser is never the source of truth for payment success. Treat an order as paid only when the <b>notify webhook</b> (sign-verified) or <b>queryOrder</b> says <code>SUCCESS</code>.</div>
+
+<h2>2. Auth &amp; signing (every request)</h2>
+<h3>2.1 OAuth token</h3>
+<pre><span class="k">POST</span> {base}/oauth/token
+{ grant_type:"password", client_id, client_secret, username, password }
+&rarr; { access_token, expires_in:1800, refresh_token }</pre>
+<p>Cache the token (TTL &lt; 1800s). Send <code>Authorization: Bearer {access_token}</code> on every <code>/api/mch/v2/gateway</code> call.</p>
+
+<h3>2.2 Signature</h3>
+<ol>
+<li>Take the request params; drop <code>sign</code>, empty/null, and array/object values.</li>
+<li>Sort keys ascending; build <code>k=v&amp;k2=v2&hellip;</code>.</li>
+<li>Append <code>&amp;key={api_key}</code>.</li>
+<li>Hash: <code>MD5</code> (default) or <code>HMAC-SHA256</code>. Put result in <code>sign</code>; set <code>sign_type</code> accordingly.</li>
+</ol>
+<p class="small">The same algorithm verifies the inbound notify (&sect;5). Payload is sent <b>flat</b> (seller_code, out_trade_no, &hellip; at top level) and signed flat.</p>
+
+<h2>3. KHQR checkout (nativePay)</h2>
+<h4>Request</h4>
+<pre><span class="k">POST</span> {base}/api/mch/v2/gateway   <span class="c">// Bearer + sign</span>
+{ service:"webpay.acquire.nativePay", service_code:"<span class="s">DYNAMICBANK</span>",
+  seller_code, out_trade_no, body, total_amount, currency:"USD",
+  notify_url, redirect_url, sign_type:"MD5", sign }</pre>
+<h4>Response (data)</h4>
+<pre>{ qrcode:"00020101...630448F7", expires_in:10799,
+  order_info:{ token, out_trade_no, status:"WAITING" } }</pre>
+<h4>Flow</h4>
+<pre class="seq"><span class="y">Buyer</span>        <span class="y">Merchant FE</span>     <span class="y">Merchant BE</span>      <span class="y">Kardal</span>
+  |  checkout KHQR  |                |               |
+  |---------------->|  POST /payment/khqr ---------->|  nativePay -->|
+  |                 |                |<-- qrcode -----|
+  |<-- render QR ---|                |               |
+  |  scan w/ bank app ----------------------------- (pays at bank)
+  |                 |  poll /status -->| queryOrder ->|
+  |                 |<-- SUCCESS ------|<-- SUCCESS ---|
+  |                 |   notify webhook <-------------- (server push)</pre>
+<ul>
+<li>Render <code>qrcode</code> as a QR image (any KHQR-capable bank app scans it).</li>
+<li>While <code>WAITING</code>: poll <code>queryOrder</code> every ~3s (and/or wait for notify). Stop on terminal status or <code>expires_in</code>.</li>
+<li><span class="tag">DYNAMICBANK</span> is this merchant&rsquo;s enabled KHQR BIC &mdash; send it as <code>service_code</code> (not <code>KHQR</code>).</li>
+</ul>
+
+<h2>4. Card checkout (directPay + 3DS)</h2>
+<h4>Request</h4>
+<pre><span class="k">POST</span> {base}/api/mch/v2/gateway   <span class="c">// Bearer + sign</span>
+{ service:"webpay.acquire.directPay", service_code:"<span class="s">VISA_MASTER</span>",
+  seller_code, out_trade_no, body, total_amount, currency,
+  card:     <span class="c">hex(RSA({number, securityCode, expiry:{month,year}}))</span>,
+  customer: <span class="c">hex(RSA({first_name,last_name,email,phone_number,phone_code}))</span>,
+  holder_name, ip_address, notify_url, redirect_url, sign_type, sign }</pre>
+<h4>Response (data)</h4>
+<pre>{ required_3ds:true, pre_card_input:true,
+  html_confirm_payment:"&lt;html&gt;&hellip;auto-submitting 3DS form&hellip;&lt;/html&gt;",
+  order_info:{ out_trade_no, status:"WAITING" } }</pre>
+<h4>Rules</h4>
+<ul>
+<li><b>Encrypt card + customer server-side</b> with the merchant <b>public key</b>, hex-encoded. Raw PAN never touches your DB or the browser payload.</li>
+<li>If <code>html_confirm_payment</code> is non-empty: render that HTML in the browser &mdash; it auto-posts to the bank ACS for 3DS. The bank returns via the embedded <code>TermUrl</code>.</li>
+<li>Confirm final state via notify / <code>queryOrder</code> (same as KHQR). <code>required_3ds=false</code> + no HTML = decided inline.</li>
+</ul>
+<p class="small">PCI note: because the cleartext PAN passes through your server before RSA encryption, you are in PCI-DSS scope. To reduce scope, collect card data in a Kardal-hosted page (createOrder / hosted link) instead of directPay.</p>
+
+<h2>5. Notify webhook (server-to-server) <span class="tag g">critical</span></h2>
+<p>Kardal POSTs the order result to your <code>notify_url</code> (form-encoded), signed with <b>your</b> <code>api_key</code>. This is the authoritative payment event.</p>
+<h4>Payload (key fields)</h4>
+<pre>token, out_trade_no, transaction_id, body, total_amount, currency,
+status, paid_at, settled_at, settlement_date, expired_at, created_at,
+detail[], seller{code,display_name}, bank_ref, trx_id, meta,
+refund_histories[], sign_type:"MD5", sign</pre>
+<h4>What your handler MUST do</h4>
+<ol>
+<li><b>Verify the sign</b>: recompute with your <code>api_key</code> over the received params (drop <code>sign</code>); reject on mismatch. Never trust an unverified callback.</li>
+<li>Look up the order by <code>out_trade_no</code>; <b>check amount + currency</b> match what you created.</li>
+<li><b>Idempotency</b>: if already finalized (e.g. status already <code>SUCCESS</code>), do nothing and return 200.</li>
+<li>Update order status; fulfill (ship goods, etc.) only on <code>SUCCESS</code>.</li>
+<li>Return <b>HTTP 200</b>. Any non-2xx &rarr; Kardal treats it as failed and <b>retries</b> (re-dispatched). Body content is ignored; status code matters.</li>
+</ol>
+<div class="callout warn"><b>Retry &amp; dedupe.</b> The gateway re-pushes on non-2xx and may push the same terminal status more than once. Your endpoint must be safe to call repeatedly. It skips re-push once it records a successful 200 for a SUCCESS event, but design for at-least-once delivery. Callbacks stop after ~180 days.</div>
+<p class="small">Local dev: the gateway must reach your <code>notify_url</code> publicly &mdash; tunnel it (ngrok) and register that URL. Timeout on Kardal&rsquo;s side is ~25s; respond fast (queue heavy work).</p>
+
+<h2>6. Query order (reconciliation)</h2>
+<pre><span class="k">POST</span> {base}/api/mch/v2/gateway
+{ service:"webpay.acquire.queryOrder", seller_code, out_trade_no, sign_type, sign }
+&rarr; data: { status, paid_at, total_amount, currency, payment_detail, card_info, refund_histories[] }</pre>
+<p>Use for: polling during checkout, a fallback if a notify was missed, and end-of-day reconciliation. Source of truth alongside notify.</p>
+
+<h2>7. Order status lifecycle</h2>
+<table>
+<tr><th>Status</th><th>Meaning</th><th>Action</th></tr>
+<tr><td><code>WAITING</code></td><td>Created, not yet paid</td><td>Keep polling until paid or expired</td></tr>
+<tr><td><code>SUCCESS</code></td><td>Paid &amp; captured <span class="tag g">terminal</span></td><td>Fulfill the order (once)</td></tr>
+<tr><td><code>FAILED</code></td><td>Payment failed <span class="tag">terminal</span></td><td>Show failure; let buyer retry (new out_trade_no)</td></tr>
+<tr><td><code>EXPIRED</code> / <code>CLOSED</code></td><td>QR/order timed out or closed</td><td>Stop polling; offer retry</td></tr>
+<tr><td><code>REFUNDED</code> / <code>PARTIAL_REFUNDED</code></td><td>Refund applied</td><td>Reconcile via refund_histories</td></tr>
+<tr><td><code>VOID</code> / <code>REVERSAL</code></td><td>Reversed</td><td>Reverse fulfillment</td></tr>
+</table>
+
+<h2>8. out_trade_no &amp; idempotency</h2>
+<ul>
+<li><code>out_trade_no</code> = your unique order reference (alphanumeric + dash, &le;32 chars). One per payment attempt.</li>
+<li>It is the join key across create &rarr; notify &rarr; queryOrder. Generate once, persist before calling the gateway.</li>
+<li>A retried/failed payment needs a <b>new</b> <code>out_trade_no</code> (duplicates are rejected, <code>409 DUPLICATED</code>).</li>
+</ul>
+
+<h2>9. Errors</h2>
+<table>
+<tr><th>Code</th><th>Status</th><th>Common cause</th></tr>
+<tr><td>400</td><td>VALIDATION_ERROR</td><td>Bad sign, missing field, wrong <code>service_code</code> / unprovisioned method (<i>Invalid payment method bic</i>)</td></tr>
+<tr><td>401</td><td>UNAUTHENTICATED</td><td>Expired/invalid token</td></tr>
+<tr><td>403</td><td>FORBIDDEN</td><td>IP not whitelisted, account disabled</td></tr>
+<tr><td>409</td><td>DUPLICATED</td><td>Reused <code>out_trade_no</code></td></tr>
+<tr><td>419</td><td>EXPIRED</td><td>Order/QR expired</td></tr>
+<tr><td>422 / 500 / 503 / 504</td><td>PROCESS_FAILED / SYSTEM_ERROR / &hellip;</td><td>Downstream/bank issue &mdash; retry with backoff, then queryOrder</td></tr>
+</table>
+
+<h2>10. Reference implementation map</h2>
+<table>
+<tr><th>Concern</th><th>File (kardal-merchant-demo)</th></tr>
+<tr><td>Config / secrets</td><td><code>config/kardal.php</code> (+ <code>KARDAL_*</code> env)</td></tr>
+<tr><td>Token, sign, gateway POST, RSA encrypt</td><td><code>app/Services/Kardal/KardalClient.php</code></td></tr>
+<tr><td>KHQR / Card / query</td><td><code>app/Services/Kardal/KardalPaymentService.php</code></td></tr>
+<tr><td>Checkout + status + notify endpoints</td><td><code>app/Http/Controllers/PaymentController.php</code></td></tr>
+<tr><td>Storefront / checkout UI / QR + 3DS render</td><td><code>resources/js/Pages/Store/*</code></td></tr>
+</table>
+<p class="small"><b>Note for production:</b> the demo&rsquo;s <code>notify()</code> handler logs + updates status but does not yet verify the inbound sign. Add sign verification (&sect;5 step 1) before going live.</p>
+
+<div class="footer">Kardal payment integration &mdash; KHQR (DYNAMICBANK) + Card (VISA_MASTER) &middot; gateway endpoint /api/mch/v2/gateway</div>
+
+</body>
+</html>
