@@ -14,14 +14,48 @@ class KardalPaymentService
 
     /**
      * KHQR (KESSKHQR) — generate a dynamic QR via nativePay.
-     * Returns the gateway `data` (qrcode, expires_in, order_info, ...).
+     * Returns the old demo shape (qrcode, expires_in, order_info, ...).
      */
     public function createKhqr(string $outTradeNo, float $amount, string $currency, string $body): array
     {
-        return $this->client->gateway($this->base($outTradeNo, $amount, $currency, $body) + [
-            'service'      => 'webpay.acquire.nativePay',
-            'service_code' => config('kardal.khqr_service_code', 'KHQR'),
-        ]);
+        $response = $this->client->ecommerceGateway([
+            'merchantKey' => config('kardal.ecommerce.core_merchant_key'),
+            'outTradeNo'  => $outTradeNo,
+            'service'     => 'PAYMENT_QR',
+            'serviceCode' => 'KHQR_KESS',
+            'processor'   => 'KESS_API',
+            'operation'   => 'GENERATE',
+            'order'       => [
+                'amount'      => number_format($amount, 2, '.', ''),
+                'currency'    => $currency,
+                'body'        => $body,
+                'notifyUrl'   => config('kardal.notify_url'),
+                'redirectUrl' => config('kardal.redirect_url'),
+            ],
+        ], $outTradeNo);
+
+        $result = is_array($response['result'] ?? null) ? $response['result'] : [];
+        $resultData = is_array($result['data'] ?? null) ? $result['data'] : [];
+        $qr = $result['qrContent']
+            ?? $result['qrcode']
+            ?? $result['qrCode']
+            ?? $result['codeUrl']
+            ?? $resultData['qrContent']
+            ?? $resultData['qrcode']
+            ?? $resultData['qrCode']
+            ?? $resultData['codeUrl']
+            ?? null;
+
+        return [
+            'qrcode'     => $qr,
+            'expires_in' => $result['expires_in'] ?? $result['expiresIn'] ?? $resultData['expires_in'] ?? $resultData['expiresIn'] ?? null,
+            'order_info' => [
+                'token'        => $response['orderKey'] ?? null,
+                'out_trade_no' => $response['outTradeNo'] ?? $outTradeNo,
+                'status'       => $response['status'] ?? null,
+            ],
+            'raw'        => $response,
+        ];
     }
 
     /**

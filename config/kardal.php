@@ -44,4 +44,21 @@ return [
 
     // Token cache (seconds). Access token default lifetime is 1800s; refresh early.
     'token_ttl' => (int) env('KARDAL_TOKEN_TTL', 1500),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Gateway Ecommerce KHQR
+    |--------------------------------------------------------------------------
+    | New merchant-facing ecommerce endpoint. Current scope: KHQR_KESS/GENERATE
+    | only. Payment Link, queryOrder, and card still use the legacy WebPay path.
+    */
+    'ecommerce' => [
+        'base_url'         => rtrim((string) env('KARDAL_GATEWAY_BASE_URL', 'http://localhost:8080'), '/'),
+        'client_id'        => env('KARDAL_OAUTH_CLIENT_ID'),
+        'client_secret'    => env('KARDAL_OAUTH_CLIENT_SECRET'),
+        'scope'            => env('KARDAL_OAUTH_SCOPE', 'merchant.ecommerce.payment:create'),
+        'signature_secret' => env('KARDAL_GATEWAY_SIGNATURE_SECRET'),
+        'core_merchant_key' => env('CORE_JAVA_MERCHANT_KEY'),
+        'token_ttl'        => (int) env('KARDAL_GATEWAY_TOKEN_TTL', 3000),
+    ],
 ];

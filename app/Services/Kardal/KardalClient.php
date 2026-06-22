@@ -7,18 +7,13 @@ use Illuminate\Support\Facades\Http;
 use RuntimeException;
 
 /**
- * Low-level Kardal gateway client: OAuth token, request signing, gateway POST.
- *
- * Every gateway operation hits the single endpoint {base}/api/mch/v2/gateway
- * and is selected by the "service" field. All secrets stay server-side.
+ * Low-level Kardal clients: legacy WebPay gateway and new Gateway ecommerce.
+ * All secrets stay server-side.
  */
 class KardalClient
 {
     public function __construct(private readonly array $config)
     {
-        if ($this->config['base_url'] === '') {
-            throw new RuntimeException('KARDAL_BASE_URL is not configured.');
-        }
     }
 
     /**
@@ -26,6 +21,10 @@ class KardalClient
      */
     public function accessToken(): string
     {
+        if ($this->config['base_url'] === '') {
+            throw new RuntimeException('KARDAL_BASE_URL is not configured.');
+        }
+
         $cached = Cache::get('kardal.access_token');
         if (is_string($cached) && $cached !== '') {
             return $cached;
@@ -66,6 +65,52 @@ class KardalClient
     private function forgetToken(): void
     {
         Cache::forget('kardal.access_token');
+    }
+
+    /**
+     * Fetch (and cache) a Gateway OAuth token via client_credentials.
+     */
+    public function ecommerceAccessToken(): string
+    {
+        $clientId = (string) ($this->config['ecommerce']['client_id'] ?? '');
+        $cacheKey = 'kardal.ecommerce.access_token.' . sha1($clientId);
+        $cached = Cache::get($cacheKey);
+        if (is_string($cached) && $cached !== '') {
+            return $cached;
+        }
+
+        $ecommerce = $this->ecommerceConfig();
+        $response = Http::asForm()
+            ->acceptJson()
+            ->withBasicAuth($ecommerce['client_id'], $ecommerce['client_secret'])
+            ->post($ecommerce['base_url'] . '/gateway/oauth2/token', [
+                'grant_type' => 'client_credentials',
+                'scope'      => $ecommerce['scope'],
+            ]);
+
+        if ($response->failed()) {
+            throw new RuntimeException('Kardal ecommerce auth failed: ' . $response->body());
+        }
+
+        $token = $this->tokenFromResponse($response->json());
+        if (! is_string($token) || $token === '') {
+            throw new RuntimeException('Kardal ecommerce auth response missing access_token.');
+        }
+
+        $expiresIn = (int) ($response->json('data.item.expires_in') ?? $response->json('expires_in') ?? 0);
+        $ttl = $expiresIn > 0
+            ? max(60, min((int) $ecommerce['token_ttl'], $expiresIn - 60))
+            : (int) $ecommerce['token_ttl'];
+
+        Cache::put($cacheKey, $token, $ttl);
+
+        return $token;
+    }
+
+    private function forgetEcommerceToken(): void
+    {
+        $clientId = (string) ($this->config['ecommerce']['client_id'] ?? '');
+        Cache::forget('kardal.ecommerce.access_token.' . sha1($clientId));
     }
 
     /**
@@ -128,6 +173,47 @@ class KardalClient
     }
 
     /**
+     * Sign raw JSON and POST the new ecommerce gateway endpoint.
+     */
+    public function ecommerceGateway(array $payload, string $idempotencyKey): array
+    {
+        $ecommerce = $this->ecommerceConfig();
+        $body = json_encode($payload, JSON_UNESCAPED_SLASHES);
+        if (! is_string($body)) {
+            throw new RuntimeException('Failed to encode ecommerce payload.');
+        }
+
+        $signature = hash_hmac('sha256', $body, $ecommerce['signature_secret']);
+
+        $post = fn () => Http::withToken($this->ecommerceAccessToken())
+            ->acceptJson()
+            ->withHeaders([
+                'request-signature' => $signature,
+                'Idempotency-Key'   => $idempotencyKey,
+            ])
+            ->withBody($body, 'application/json')
+            ->post($ecommerce['base_url'] . '/api/ecommerce/v1/gateway');
+
+        $response = $post();
+
+        if ($response->status() === 401) {
+            $this->forgetEcommerceToken();
+            $response = $post();
+        }
+
+        if ($response->failed()) {
+            throw new RuntimeException('Kardal ecommerce gateway error (' . $response->status() . '): ' . $response->body());
+        }
+
+        $body = $response->json();
+        if (! is_array($body)) {
+            throw new RuntimeException('Kardal ecommerce gateway returned invalid JSON: ' . $response->body());
+        }
+
+        return $body;
+    }
+
+    /**
      * RSA-encrypt a JSON object with the merchant public key, hex-encoded.
      * Used for the card + customer blobs in directPay.
      */
@@ -159,5 +245,29 @@ class KardalClient
         }
 
         return (string) file_get_contents($path);
+    }
+
+    private function ecommerceConfig(): array
+    {
+        $ecommerce = $this->config['ecommerce'] ?? [];
+        foreach (['base_url', 'client_id', 'client_secret', 'scope', 'signature_secret', 'core_merchant_key'] as $key) {
+            if (($ecommerce[$key] ?? '') === '') {
+                throw new RuntimeException('KARDAL ecommerce config missing: ' . $key);
+            }
+        }
+
+        return $ecommerce;
+    }
+
+    private function tokenFromResponse(?array $body): ?string
+    {
+        if (! is_array($body)) {
+            return null;
+        }
+
+        return $body['data']['item']['access_token']
+            ?? $body['access_token']
+            ?? $body['token']
+            ?? null;
     }
 }

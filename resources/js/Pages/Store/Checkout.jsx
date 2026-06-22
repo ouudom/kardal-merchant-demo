@@ -4,7 +4,7 @@ import StoreHeader from '@/Components/StoreHeader';
 
 export default function Checkout({ cart }) {
     const currency = 'USD';
-    const [tab, setTab] = useState('link'); // payment link = primary method
+    const [tab, setTab] = useState('khqr'); // payment link = primary method
     const total = cart.reduce((sum, i) => sum + Number(i.price) * i.qty, 0);
 
     const setQty = (item, qty) =>
@@ -64,8 +64,8 @@ export default function Checkout({ cart }) {
 
                 <div>
                     <div className="mb-4 flex gap-2">
-                        <TabButton active={tab === 'link'} onClick={() => setTab('link')}>Payment Link</TabButton>
                         <TabButton active={tab === 'khqr'} onClick={() => setTab('khqr')}>KHQR</TabButton>
+                        <TabButton active={tab === 'link'} onClick={() => setTab('link')}>Payment Link</TabButton>
                         {/* Card payment disabled for this demo.
                         <TabButton active={tab === 'card'} onClick={() => setTab('card')}>Card</TabButton>
                         */}
