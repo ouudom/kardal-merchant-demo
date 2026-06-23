@@ -192,7 +192,7 @@ class KardalClient
                 'Idempotency-Key'   => $idempotencyKey,
             ])
             ->withBody($body, 'application/json')
-            ->post($ecommerce['base_url'] . '/api/ecommerce/v1/gateway');
+            ->post($ecommerce['base_url'] . '/api/gateway/v1/ecommerce');
 
         $response = $post();
 

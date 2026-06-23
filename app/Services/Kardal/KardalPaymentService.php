@@ -5,8 +5,8 @@ namespace App\Services\Kardal;
 /**
  * High-level Kardal operations used by the Nike-store demo.
  *
- * Payloads are FLAT (seller_code, out_trade_no, ... at top level) to match the
- * signature computed by KardalClient::sign() and the working web-demo reference.
+ * Ecommerce KHQR payloads are flat camelCase JSON signed as raw body by
+ * KardalClient::ecommerceGateway().
  */
 class KardalPaymentService
 {
@@ -25,13 +25,11 @@ class KardalPaymentService
             'serviceCode' => 'KHQR_KESS',
             'processor'   => 'KESS_API',
             'operation'   => 'GENERATE',
-            'order'       => [
-                'amount'      => number_format($amount, 2, '.', ''),
-                'currency'    => $currency,
-                'body'        => $body,
-                'notifyUrl'   => config('kardal.notify_url'),
-                'redirectUrl' => config('kardal.redirect_url'),
-            ],
+            'totalAmount' => round($amount, 2),
+            'currency'    => $currency,
+            'body'        => $body,
+            'notifyUrl'   => config('kardal.notify_url'),
+            'redirectUrl' => config('kardal.redirect_url'),
         ], $outTradeNo);
 
         $result = is_array($response['result'] ?? null) ? $response['result'] : [];
