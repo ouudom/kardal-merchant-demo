@@ -183,59 +183,66 @@ Payment options / services available:
 
 ## Part 2 — API integration
 
-One endpoint does everything; the `service` field selects the operation.
+Current demo payment path uses **Gateway ecommerce** in front of **Core Java**.
+Legacy WebPay password-grant/card routes stay in code only for reference.
 
-| Operation | `service` | `service_code` |
-|-----------|-----------|----------------|
-| OAuth token | — (`POST {base}/oauth/token`) | — |
-| List payment methods | `webpay.acquire.getpaymentmethods` | — |
-| Generate payment link (hosted) | `webpay.acquire.createOrder` | — |
-| **KHQR** | `webpay.acquire.nativePay` | `KESSKHQR` |
-| **Card** | `webpay.acquire.directPay` | `VISA_MASTER` |
-| Query order | `webpay.acquire.queryOrder` | — |
+| Operation | Route / `service` | Notes |
+|-----------|-------------------|-------|
+| OAuth token | `POST {base}/gateway/oauth2/token` | `client_credentials` + Basic auth |
+| Generate payment link (hosted) | `service=createPaymentLink` | `POST {base}/api/gateway/v1/ecommerce` |
+| **KHQR** | `service=nativePay` | `POST {base}/api/gateway/v1/ecommerce` |
+| Checkout status | `GET {base}/api/gateway/v1/ecommerce/checkout/{orderKey}/status` | signed by `orderKey` |
+| **Card** | legacy `webpay.acquire.directPay` | disabled in this demo |
 
-Gateway endpoint: `POST {base}/api/mch/v2/gateway` (Bearer token + signed body).
+Merchant create routes require bearer OAuth + raw-body `request-signature` +
+`Idempotency-Key`.
 
 ### 2.1 Authenticate
 
 ```
-POST {base}/oauth/token
-{ "grant_type":"password", "client_id":"...", "client_secret":"...",
-  "username":"...", "password":"..." }
-→ { "access_token":"...", "expires_in":1800, "refresh_token":"..." }
+POST {base}/gateway/oauth2/token
+Authorization: Basic {base64(client_id:client_secret)}
+grant_type=client_credentials&scope=merchant.ecommerce.payment:create
 ```
-`access_token` lives 1800s; cache and reuse. Send `Authorization: Bearer {token}`
-on every gateway call. (`kardal-api-docs/content/authentication.mdx`.)
+Gateway returns Kardal envelope data with `accessToken` / `expiresIn`. Cache and
+reuse the bearer token server-side.
 
 ### 2.2 Sign every request
 
-Algorithm (verified byte-identical with `web-demo/backend/index.php:28` `makeSign`):
+Merchant create calls:
 
-1. Drop `sign`, empty, null, array/object fields.
-2. Sort remaining keys ascending.
-3. Join as `k=v&k2=v2...`.
-4. Append `&key={api_key}`.
-5. `MD5` (default) or `HMAC-SHA256` per `sign_type`. Put result in `sign`.
+1. Build exact raw JSON body with camelCase fields.
+2. HMAC-SHA256 sign the exact body using `KARDAL_API_KEY`.
+3. Send header `request-signature: {hex}`.
+4. Send `Idempotency-Key: {outTradeNo}`.
 
-> **Payload shape:** the API docs show fields nested under a `transaction` object,
-> but the working web-demo (and this app) send a **flat** payload (`seller_code`,
-> `out_trade_no`, … at top level) and sign the flat keys. Match whatever the DEV
-> gateway accepts — flat is the verified-working form.
+Checkout status calls:
 
-Implementation: `app/Services/Kardal/KardalClient.php` (`sign()`, `gateway()`).
+1. HMAC-SHA256 sign the plain `orderKey` using `KARDAL_API_KEY`.
+2. Send that value as `request-signature`.
 
-### 2.3 KHQR (KESSKHQR)
+Implementation: `app/Services/Kardal/KardalClient.php` (`ecommerceGateway()`,
+`ecommerceCheckoutStatus()`).
 
-`service=webpay.acquire.nativePay`, `service_code=KESSKHQR`. Response `data`:
+### 2.3 KHQR (`service=nativePay`)
+
+Request body:
 
 ```json
-{ "qrcode": "00020101...630448F7", "expires_in": 10799,
-  "order_info": { "token": "...", "out_trade_no": "...", "status": "WAITING" } }
+{
+  "merchantKey": "...",
+  "outTradeNo": "nike-...",
+  "service": "nativePay",
+  "totalAmount": 12.34,
+  "currency": "USD",
+  "body": "Nike Store Order",
+  "notifyUrl": "https://merchant.example/payment/notify",
+  "redirectUrl": "https://merchant.example/order/nike-..."
+}
 ```
 
-Render `qrcode` as a QR image, customer scans with any KHQR bank app, then **poll
-`queryOrder`** (or wait for the notify webhook) until `status` is paid.
-(`kardal-api-docs/content/api-gateway/native-pay.mdx`.)
+Response includes `orderKey`, `status`, and `result.qrContent`/`qrcode`. Render
+the QR, then poll checkout status by that `orderKey` until terminal.
 
 ### 2.4 Card (VISA_MASTER, Direct Pay)
 
@@ -261,10 +268,11 @@ confirm final status via `queryOrder` / notify.
 (`kardal-api-docs/content/api-gateway/direct-pay.mdx`.) RSA reference:
 `web-demo/backend/index.php:763`.
 
-### 2.5 Query order
+### 2.5 Checkout status
 
-`service=webpay.acquire.queryOrder`, `out_trade_no=...` → current `status`,
-`payment_detail`, `card_info`, refund history.
+`GET /api/gateway/v1/ecommerce/checkout/{orderKey}/status` returns public order
+state such as `status` and `paidAt`. Current demo stores `orderKey` in
+`orders.token` and polls through Laravel.
 
 ### 2.6 Notify webhook
 
@@ -289,34 +297,34 @@ thin server-side proxy to Kardal.
 
 | File | Role |
 |------|------|
-| `config/kardal.php` | All gateway config (base URL, OAuth, seller_code, api_key, public key, URLs) |
-| `app/Services/Kardal/KardalClient.php` | OAuth token cache, request signing, gateway POST, RSA encrypt |
-| `app/Services/Kardal/KardalPaymentService.php` | `createKhqr()`, `createCardPayment()`, `queryOrder()` |
+| `config/kardal.php` | Gateway ecommerce config, legacy card/query fallback config, callback URLs |
+| `app/Services/Kardal/KardalClient.php` | OAuth token cache, raw-body request signing, checkout status signing, legacy helpers, RSA encrypt |
+| `app/Services/Kardal/KardalPaymentService.php` | `createKhqr()`, `createPaymentLink()`, `queryOrder()` |
 | `app/Http/Controllers/StoreController.php` | Inertia pages: store, checkout, result |
-| `app/Http/Controllers/PaymentController.php` | `POST /payment/khqr`, `/payment/card`, `GET /payment/{id}/status`, `POST /payment/notify` |
+| `app/Http/Controllers/PaymentController.php` | `POST /payment/khqr`, `/payment/link`, `GET /payment/{id}/status`, `POST /payment/notify` |
 | `app/Models/Order.php` + `orders` migration | Local order tracking |
-| `resources/js/Pages/Store/{Index,Checkout,Result}.jsx` | Storefront, KHQR + Card checkout, result |
-| `resources/js/lib/cart.js` | localStorage cart |
+| `resources/js/Pages/Store/{Index,Checkout,Result}.jsx` | Storefront, KHQR + payment-link checkout, result |
 
 Secrets stay server-side; the browser only sees `qrcode`, `html_confirm_payment`,
 and order status.
 
 ### 3.2 Configure (`.env`)
 
-Fill from the downloaded credential package (Part 1.7):
+Fill Gateway ecommerce values:
 
 ```
-KARDAL_BASE_URL=https://<dev-gateway-host>
-KARDAL_CLIENT_ID=...
-KARDAL_CLIENT_SECRET=...
-KARDAL_USERNAME=...
-KARDAL_PASSWORD=...
-KARDAL_SELLER_CODE=...
-KARDAL_API_KEY=...            # = api_secret_key from credential.txt
-KARDAL_SIGN_TYPE=MD5          # or HMAC-SHA256
+KARDAL_GATEWAY_BASE_URL=http://localhost:8080
+KARDAL_OAUTH_CLIENT_ID=...
+KARDAL_OAUTH_CLIENT_SECRET=...
+KARDAL_OAUTH_SCOPE=merchant.ecommerce.payment:create
+KARDAL_API_KEY=...
+KARDAL_MERCHANT_KEY=...
 KARDAL_NOTIFY_URL=${APP_URL}/payment/notify
 KARDAL_REDIRECT_URL=${APP_URL}
 ```
+
+Legacy `KARDAL_BASE_URL`, password-grant, seller-code, and RSA public key vars
+only matter if you re-enable old WebPay card/queryOrder paths.
 
 Place the RSA public key at `storage/app/kardal/merchant-public.key`
 (the `*-public.key` from the package), or set `KARDAL_PUBLIC_KEY` inline.
@@ -335,12 +343,14 @@ php artisan serve
 ```
 
 Open `/` → add Nike products → **Checkout** → pick **KHQR** (scan, auto-polls) or
-**Card** (encrypted server-side, handles 3DS) → redirected to the order result.
+**Payment Link** (redirect to hosted checkout) → redirected to the order result.
 
 ### 3.4 Flow recap
 
-```
-Browser → /payment/khqr|card → PaymentController → KardalPaymentService
-  → KardalClient (token + sign + RSA) → POST {base}/api/mch/v2/gateway
-Gateway → notify_url (server-to-server)  +  Browser polls /payment/{id}/status
+```text
+Browser → /payment/khqr|link → PaymentController → KardalPaymentService
+  → KardalClient → POST /gateway/oauth2/token
+  → KardalClient → POST {base}/api/gateway/v1/ecommerce
+Gateway/Core Java → notify_url
+Browser → /payment/{id}/status → Laravel → GET /api/gateway/v1/ecommerce/checkout/{orderKey}/status
 ```

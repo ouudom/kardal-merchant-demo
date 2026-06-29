@@ -13,24 +13,16 @@ class KardalPaymentService
     public function __construct(private readonly KardalClient $client) {}
 
     /**
-     * KHQR (KESSKHQR) — generate a dynamic QR via nativePay.
+     * KHQR — generate a dynamic QR via Gateway ecommerce nativePay.
      * Returns the old demo shape (qrcode, expires_in, order_info, ...).
      */
     public function createKhqr(string $outTradeNo, float $amount, string $currency, string $body): array
     {
-        $response = $this->client->ecommerceGateway([
-            'merchantKey' => config('kardal.ecommerce.core_merchant_key'),
-            'outTradeNo'  => $outTradeNo,
-            'service'     => 'PAYMENT_QR',
-            'serviceCode' => 'KHQR_KESS',
-            'processor'   => 'KESS_API',
-            'operation'   => 'GENERATE',
-            'totalAmount' => round($amount, 2),
-            'currency'    => $currency,
-            'body'        => $body,
-            'notifyUrl'   => config('kardal.notify_url'),
-            'redirectUrl' => config('kardal.redirect_url'),
-        ], $outTradeNo);
+        $rawResponse = $this->client->ecommerceGateway(
+            $this->ecommerceBase($outTradeNo, $amount, $currency, $body) + ['service' => 'nativePay'],
+            $outTradeNo
+        );
+        $response = $this->ecommerceResponseData($rawResponse);
 
         $result = is_array($response['result'] ?? null) ? $response['result'] : [];
         $resultData = is_array($result['data'] ?? null) ? $result['data'] : [];
@@ -52,28 +44,33 @@ class KardalPaymentService
                 'out_trade_no' => $response['outTradeNo'] ?? $outTradeNo,
                 'status'       => $response['status'] ?? null,
             ],
-            'raw'        => $response,
+            'raw'        => $rawResponse,
         ];
     }
 
     /**
-     * Hosted payment link (createOrder) — returns a Kardal-hosted page URL the
-     * buyer is redirected to. Buyer picks any enabled method there.
-     * Returns the gateway `data` (payment_link, token, out_trade_no, ...).
+     * Hosted payment link — returns the checkout URL from Gateway ecommerce
+     * createPaymentLink. Buyer picks any enabled method there.
      */
     public function createPaymentLink(string $outTradeNo, float $amount, string $currency, string $body, ?string $redirectUrl = null): array
     {
-        $payload = $this->base($outTradeNo, $amount, $currency, $body) + [
-            'service'    => 'webpay.acquire.createOrder',
-            'login_type' => 'ANONYMOUS',
-            'expires_in' => 12000,
+        $rawResponse = $this->client->ecommerceGateway(
+            $this->ecommerceBase($outTradeNo, $amount, $currency, $body, $redirectUrl) + ['service' => 'createPaymentLink'],
+            $outTradeNo
+        );
+        $response = $this->ecommerceResponseData($rawResponse);
+
+        $result = is_array($response['result'] ?? null) ? $response['result'] : [];
+
+        return [
+            'payment_link' => $result['paymentLink'] ?? $response['paymentLink'] ?? null,
+            'order_info'   => [
+                'token'        => $response['orderKey'] ?? null,
+                'out_trade_no' => $response['outTradeNo'] ?? $outTradeNo,
+                'status'       => $response['status'] ?? null,
+            ],
+            'raw'          => $rawResponse,
         ];
-
-        if ($redirectUrl) {
-            $payload['redirect_url'] = $redirectUrl;   // bring buyer back to the order page
-        }
-
-        return $this->client->gateway($payload);
     }
 
     /** List the payment methods (BICs) actually enabled for this merchant. */
@@ -118,8 +115,20 @@ class KardalPaymentService
     /**
      * Query an order's current status by out_trade_no.
      */
-    public function queryOrder(string $outTradeNo): array
+    public function queryOrder(string $outTradeNo, ?string $orderKey = null): array
     {
+        if ($orderKey && config('kardal.api_key')) {
+            $response = $this->client->ecommerceCheckoutStatus($orderKey);
+            $data = is_array($response['data'] ?? null) ? $response['data'] : [];
+
+            return [
+                'status'    => $data['status'] ?? $response['status'] ?? null,
+                'order_key' => $data['orderKey'] ?? $orderKey,
+                'paid_at'   => $data['paidAt'] ?? null,
+                'raw'       => $response,
+            ];
+        }
+
         return $this->client->gateway([
             'service'      => 'webpay.acquire.queryOrder',
             'out_trade_no' => $outTradeNo,
@@ -138,5 +147,28 @@ class KardalPaymentService
             'notify_url'   => config('kardal.notify_url'),
             'redirect_url' => config('kardal.redirect_url'),
         ];
+    }
+
+    private function ecommerceBase(
+        string $outTradeNo,
+        float $amount,
+        string $currency,
+        string $body,
+        ?string $redirectUrl = null
+    ): array {
+        return [
+            'merchantKey' => config('kardal.ecommerce.merchant_key'),
+            'outTradeNo'  => $outTradeNo,
+            'totalAmount' => round($amount, 2),
+            'currency'    => $currency,
+            'body'        => $body,
+            'notifyUrl'   => config('kardal.notify_url'),
+            'redirectUrl' => $redirectUrl ?: config('kardal.redirect_url'),
+        ];
+    }
+
+    private function ecommerceResponseData(array $response): array
+    {
+        return is_array($response['data'] ?? null) ? $response['data'] : $response;
     }
 }

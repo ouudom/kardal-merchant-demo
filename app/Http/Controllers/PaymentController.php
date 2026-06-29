@@ -17,7 +17,7 @@ class PaymentController extends Controller
 
     public function __construct(private readonly KardalPaymentService $kardal) {}
 
-    /** Create a KHQR (KESSKHQR) order and return the QR string. */
+    /** Create a KHQR order through Gateway ecommerce and return the QR string. */
     public function khqr(Request $request)
     {
         $order = $this->newOrder('khqr');
@@ -41,7 +41,7 @@ class PaymentController extends Controller
         ]);
     }
 
-    /** Create a hosted payment link (createOrder) and return its URL. */
+    /** Create a hosted payment link through Gateway ecommerce and return its URL. */
     public function link(Request $request)
     {
         $order = $this->newOrder('link');
@@ -54,7 +54,7 @@ class PaymentController extends Controller
             route('store.result', $order->out_trade_no)   // return buyer to the order page
         );
 
-        $order->update(['token' => $res['token'] ?? ($res['order_info']['token'] ?? null)]);
+        $order->update(['token' => $res['order_info']['token'] ?? null]);
 
         return response()->json([
             'out_trade_no' => $order->out_trade_no,
@@ -109,7 +109,7 @@ class PaymentController extends Controller
             ->where('out_trade_no', $outTradeNo)
             ->firstOrFail();
 
-        $res = $this->kardal->queryOrder($outTradeNo);
+        $res = $this->kardal->queryOrder($outTradeNo, $order->token);
 
         if (! empty($res['status'])) {
             $order->update(['status' => $res['status']]);

@@ -3,8 +3,8 @@
 Demo merchant app — Laravel 13 + Inertia + React — integrating the **Kardal**
 payment gateway. Buyers register/log in (Breeze), build a server-side cart, and
 pay via **Payment Link** (primary) or **KHQR (KESSKHQR)**, then see their order
-history. Card (VISA_MASTER) is wired but commented out. KHQR uses Gateway
-ecommerce on port `8080`; Payment Link still uses the legacy WebPay path.
+history. Card (VISA_MASTER) is wired but commented out. Both KHQR and Payment
+Link now use Gateway ecommerce + Core Java.
 
 ## Flow
 
@@ -22,8 +22,8 @@ ecommerce on port `8080`; Payment Link still uses the legacy WebPay path.
 composer install
 npm install
 cp .env.example .env && php artisan key:generate   # if no .env yet
-# fill KARDAL_* in .env from your KUP credential package
-# fill KARDAL_GATEWAY_* and CORE_JAVA_MERCHANT_KEY for KHQR via Gateway
+# fill KARDAL_GATEWAY_*, KARDAL_API_KEY, and KARDAL_MERCHANT_KEY for Gateway ecommerce
+# keep legacy KARDAL_* only if you still test old card/queryOrder paths
 php artisan migrate
 npm run dev
 php artisan serve
@@ -39,15 +39,15 @@ API integration: **[docs/ONBOARDING-AND-INTEGRATION.md](docs/ONBOARDING-AND-INTE
 ## Kardal config
 
 All gateway settings live in `config/kardal.php`, driven by `KARDAL_*` env vars.
-Secrets (api_key, OAuth creds, request-signature secret, RSA key) stay server-side.
+Secrets stay server-side.
 
-For local KHQR through Gateway:
+For local Gateway ecommerce:
 
 ```env
 KARDAL_GATEWAY_BASE_URL=http://localhost:8080
 KARDAL_OAUTH_CLIENT_ID=kardal-merchant-demo
 KARDAL_OAUTH_CLIENT_SECRET=merchant-demo-secret
 KARDAL_OAUTH_SCOPE=merchant.ecommerce.payment:create
-KARDAL_GATEWAY_SIGNATURE_SECRET=...
-CORE_JAVA_MERCHANT_KEY=...
+KARDAL_API_KEY=...
+KARDAL_MERCHANT_KEY=...
 ```

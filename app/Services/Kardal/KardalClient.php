@@ -97,7 +97,7 @@ class KardalClient
             throw new RuntimeException('Kardal ecommerce auth response missing access_token.');
         }
 
-        $expiresIn = (int) ($response->json('data.item.expires_in') ?? $response->json('expires_in') ?? 0);
+        $expiresIn = $this->expiresInFromResponse($response->json());
         $ttl = $expiresIn > 0
             ? max(60, min((int) $ecommerce['token_ttl'], $expiresIn - 60))
             : (int) $ecommerce['token_ttl'];
@@ -183,7 +183,7 @@ class KardalClient
             throw new RuntimeException('Failed to encode ecommerce payload.');
         }
 
-        $signature = hash_hmac('sha256', $body, $ecommerce['signature_secret']);
+        $signature = hash_hmac('sha256', $body, $this->config['api_key']);
 
         $post = fn () => Http::withToken($this->ecommerceAccessToken())
             ->acceptJson()
@@ -208,6 +208,30 @@ class KardalClient
         $body = $response->json();
         if (! is_array($body)) {
             throw new RuntimeException('Kardal ecommerce gateway returned invalid JSON: ' . $response->body());
+        }
+
+        return $body;
+    }
+
+    /**
+     * Read checkout order status from the public Gateway checkout route.
+     */
+    public function ecommerceCheckoutStatus(string $orderKey): array
+    {
+        $ecommerce = $this->ecommerceCheckoutConfig();
+        $response = Http::acceptJson()
+            ->withHeaders([
+                'request-signature' => hash_hmac('sha256', $orderKey, $this->config['api_key']),
+            ])
+            ->get($ecommerce['base_url'] . '/api/gateway/v1/ecommerce/checkout/' . rawurlencode($orderKey) . '/status');
+
+        if ($response->failed()) {
+            throw new RuntimeException('Kardal ecommerce checkout status error (' . $response->status() . '): ' . $response->body());
+        }
+
+        $body = $response->json();
+        if (! is_array($body)) {
+            throw new RuntimeException('Kardal ecommerce checkout status returned invalid JSON: ' . $response->body());
         }
 
         return $body;
@@ -250,10 +274,28 @@ class KardalClient
     private function ecommerceConfig(): array
     {
         $ecommerce = $this->config['ecommerce'] ?? [];
-        foreach (['base_url', 'client_id', 'client_secret', 'scope', 'signature_secret', 'core_merchant_key'] as $key) {
+        foreach (['base_url', 'client_id', 'client_secret', 'scope', 'merchant_key'] as $key) {
             if (($ecommerce[$key] ?? '') === '') {
                 throw new RuntimeException('KARDAL ecommerce config missing: ' . $key);
             }
+        }
+        if (($this->config['api_key'] ?? '') === '') {
+            throw new RuntimeException('KARDAL config missing: api_key');
+        }
+
+        return $ecommerce;
+    }
+
+    private function ecommerceCheckoutConfig(): array
+    {
+        $ecommerce = $this->config['ecommerce'] ?? [];
+        foreach (['base_url'] as $key) {
+            if (($ecommerce[$key] ?? '') === '') {
+                throw new RuntimeException('KARDAL ecommerce checkout config missing: ' . $key);
+            }
+        }
+        if (($this->config['api_key'] ?? '') === '') {
+            throw new RuntimeException('KARDAL config missing: api_key');
         }
 
         return $ecommerce;
@@ -265,9 +307,30 @@ class KardalClient
             return null;
         }
 
-        return $body['data']['item']['access_token']
+        return $body['data']['item']['accessToken']
+            ?? $body['data']['item']['access_token']
+            ?? $body['data']['accessToken']
+            ?? $body['data']['access_token']
+            ?? $body['accessToken']
             ?? $body['access_token']
             ?? $body['token']
             ?? null;
+    }
+
+    private function expiresInFromResponse(?array $body): int
+    {
+        if (! is_array($body)) {
+            return 0;
+        }
+
+        return (int) (
+            $body['data']['item']['expiresIn']
+            ?? $body['data']['item']['expires_in']
+            ?? $body['data']['expiresIn']
+            ?? $body['data']['expires_in']
+            ?? $body['expiresIn']
+            ?? $body['expires_in']
+            ?? 0
+        );
     }
 }
